@@ -1,0 +1,68 @@
+name: Deploy backend to CCE
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  SWR_REGISTRY: swr.cn-north-4.myhuaweicloud.com
+  SWR_NAMESPACE: yunjisuan-keshe
+  IMAGE_NAME: backend
+  KUBE_NAMESPACE: keshe
+  KUBE_DEPLOYMENT: backend
+  KUBE_CONTAINER: backend
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Generate image tag
+        id: vars
+        run: |
+          SHORT_SHA=${GITHUB_SHA::7}
+          echo "IMAGE_TAG=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_URI=${SWR_REGISTRY}/${SWR_NAMESPACE}/${IMAGE_NAME}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Huawei Cloud SWR
+        run: |
+          echo "${{ secrets.SWR_SK }}" | docker login \
+            -u "cn-north-4@${{ secrets.SWR_AK }}" \
+            --password-stdin \
+            "${SWR_REGISTRY}"
+
+      - name: Build and push backend image
+        run: |
+          docker build \
+            --provenance=false \
+            -f Dockerfile.backend \
+            -t "${{ steps.vars.outputs.IMAGE_URI }}" \
+            -t "${SWR_REGISTRY}/${SWR_NAMESPACE}/${IMAGE_NAME}:latest" \
+            .
+          docker push "${{ steps.vars.outputs.IMAGE_URI }}"
+          docker push "${SWR_REGISTRY}/${SWR_NAMESPACE}/${IMAGE_NAME}:latest"
+
+      - name: Deploy to CCE through ECS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ECS_HOST }}
+          username: ${{ secrets.ECS_USER }}
+          password: ${{ secrets.ECS_PASSWORD }}
+          script: |
+            set -e
+            echo "Target image: ${{ steps.vars.outputs.IMAGE_URI }}"
+            kubectl -n keshe get deployment backend -o wide
+            kubectl -n keshe set image deployment/backend backend=${{ steps.vars.outputs.IMAGE_URI }}
+            kubectl -n keshe rollout status deployment/backend --timeout=180s
+            kubectl -n keshe get pods -l app=backend -o wide || true
+            kubectl -n keshe get deployment backend -o wide
+            kubectl -n keshe get deployment backend -o jsonpath='{.spec.template.spec.containers[*].image}'
+            echo
